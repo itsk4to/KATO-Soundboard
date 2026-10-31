@@ -22,29 +22,61 @@ jobs:
         shell: pwsh
         run: |
           $zip = Get-ChildItem -Filter "*source.zip" | Select-Object -First 1
-
           if (-not $zip) {
-            throw "Khong tim thay file source ZIP"
+            throw "Không tìm thấy file source ZIP"
           }
 
           Expand-Archive $zip.FullName -DestinationPath extracted -Force
-
           $root = Get-ChildItem extracted -Directory | Select-Object -First 1
-
           if (-not $root) {
-            throw "Khong tim thay thu muc source"
+            throw "Không tìm thấy thư mục source"
           }
 
           Copy-Item "$($root.FullName)\*" "." -Recurse -Force
 
-          # Sua duong dan miniaudio
+          # Fix miniaudio source file
           $cmake = Get-Content "CMakeLists.txt" -Raw
           $cmake = $cmake.Replace(
             '${miniaudio_SOURCE_DIR}/miniaudio.c',
             'src/miniaudio_impl.cpp'
           )
-
           Set-Content "CMakeLists.txt" $cmake -Encoding utf8
+
+          # Fix UTF-16 vs UTF-8 device name comparison
+          $audio = Get-Content "src/audio_engine.cpp" -Raw
+
+          $insert = @'
+          c.dataCallback=Callback; c.pUserData=&ctx;
+              std::string nameUtf8;
+              if (!name.empty()) {
+                  int needed = WideCharToMultiByte(
+                      CP_UTF8, 0, name.c_str(), -1,
+                      nullptr, 0, nullptr, nullptr
+                  );
+                  if (needed > 1) {
+                      std::vector<char> buffer(
+                          static_cast<size_t>(needed)
+                      );
+                      WideCharToMultiByte(
+                          CP_UTF8, 0, name.c_str(), -1,
+                          buffer.data(), needed, nullptr, nullptr
+                      );
+                      nameUtf8.assign(buffer.data());
+                  }
+              }
+          '@
+
+          $audio = $audio.Replace(
+            'c.dataCallback=Callback; c.pUserData=&ctx;',
+            $insert.Trim()
+          )
+
+          $audio = $audio.Replace(
+            'if(name==infos[i].name)',
+            'if(nameUtf8==infos[i].name)'
+          )
+
+          Set-Content "src/audio_engine.cpp" $audio -Encoding utf8
 
       - name: Configure
         run: cmake -S . -B build -A x64
@@ -55,7 +87,7 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
-      - name: Prepare installer
+      - name: Prepare installer script
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force installer/output | Out-Null
