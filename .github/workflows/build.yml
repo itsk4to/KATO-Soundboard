@@ -1,1 +1,117 @@
 
+name: KATO Soundboard Windows Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract source ZIP and fix source list
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Filter "*source.zip" | Select-Object -First 1
+
+          if (-not $zip) {
+            throw "Khong tim thay file source ZIP"
+          }
+
+          Expand-Archive $zip.FullName -DestinationPath extracted -Force
+
+          $root = Get-ChildItem extracted -Directory | Select-Object -First 1
+
+          if (-not $root) {
+            throw "Khong tim thay thu muc source"
+          }
+
+          Copy-Item "$($root.FullName)\*" "." -Recurse -Force
+
+          # Sua duong dan miniaudio
+          $cmake = Get-Content "CMakeLists.txt" -Raw
+          $cmake = $cmake.Replace(
+            '${miniaudio_SOURCE_DIR}/miniaudio.c',
+            'src/miniaudio_impl.cpp'
+          )
+
+          Set-Content "CMakeLists.txt" $cmake -Encoding utf8
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Compile
+        run: cmake --build build --config Release --parallel
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Prepare installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force installer/output | Out-Null
+
+          @'
+          #define AppName "KATO Soundboard"
+          #define AppVersion "0.1.0"
+          #define AppExeName "KATOSoundboard.exe"
+
+          [Setup]
+          AppId={{A2D1A3A0-7C20-4B72-8F39-3EAF0B2A1A10}
+          AppName={#AppName}
+          AppVersion={#AppVersion}
+          AppPublisher=KATO
+          DefaultDirName={autopf}\KATO Soundboard
+          DefaultGroupName=KATO Soundboard
+          OutputDir=output
+          OutputBaseFilename=KATO-Soundboard-Setup-v{#AppVersion}
+          ArchitecturesInstallIn64BitMode=x64
+          ArchitecturesAllowed=x64
+          PrivilegesRequired=admin
+          Compression=lzma2
+          SolidCompression=yes
+          WizardStyle=modern
+
+          [Files]
+          Source: "..\build\Release\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+
+          [Icons]
+          Name: "{autoprograms}\KATO Soundboard"; Filename: "{app}\{#AppExeName}"
+          Name: "{autodesktop}\KATO Soundboard"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+
+          [Tasks]
+          Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
+
+          [Run]
+          Filename: "{app}\{#AppExeName}"; Description: "Launch KATO Soundboard"; Flags: postinstall nowait skipifsilent
+          '@ | Set-Content "installer/KATO-Soundboard.iss" -Encoding utf8
+
+      - name: Create installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+
+          & $iscc "installer/KATO-Soundboard.iss"
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: KATO-Soundboard-Windows-Test
+          path: |
+            build/Release/KATOSoundboard.exe
+            installer/output/*.exe
+          if-no-files-found: error
+          retention-days: 30
