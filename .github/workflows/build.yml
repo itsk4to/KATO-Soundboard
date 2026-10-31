@@ -1,1 +1,64 @@
+name: KATO Soundboard Windows Build
 
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract source ZIP
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Filter "*source.zip" | Select-Object -First 1
+          if (-not $zip) {
+            throw "Không tìm thấy file source ZIP"
+          }
+
+          Expand-Archive $zip.FullName -DestinationPath extracted -Force
+
+          $root = Get-ChildItem extracted -Directory | Select-Object -First 1
+          if (-not $root) {
+            throw "Không tìm thấy thư mục source"
+          }
+
+          Copy-Item "$($root.FullName)\*" "." -Recurse -Force
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Compile
+        run: cmake --build build --config Release --parallel
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Create installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force installer/output | Out-Null
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "installer/KATO-Soundboard.iss"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: KATO-Soundboard-Windows-Test
+          path: |
+            build/Release/KATO-Soundboard.exe
+            installer/output/*.exe
+          if-no-files-found: error
+          retention-days: 30
