@@ -18,31 +18,61 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract source ZIP and fix source list
+      - name: Extract source ZIP and patch project
         shell: pwsh
         run: |
           $zip = Get-ChildItem -Filter "*source.zip" | Select-Object -First 1
           if (-not $zip) {
-            throw "Không tìm thấy file source ZIP"
+            throw "Source ZIP not found"
           }
 
           Expand-Archive $zip.FullName -DestinationPath extracted -Force
+
           $root = Get-ChildItem extracted -Directory | Select-Object -First 1
           if (-not $root) {
-            throw "Không tìm thấy thư mục source"
+            throw "Source folder not found"
           }
 
           Copy-Item "$($root.FullName)\*" "." -Recurse -Force
 
-          # Fix miniaudio source file
+          # Read CMakeLists
           $cmake = Get-Content "CMakeLists.txt" -Raw
+
+          # Fix miniaudio source
           $cmake = $cmake.Replace(
             '${miniaudio_SOURCE_DIR}/miniaudio.c',
             'src/miniaudio_impl.cpp'
           )
+
+          # Create a real ImGui static library target
+          $imguiBlock = @'
+          add_library(imgui STATIC
+              ${imgui_SOURCE_DIR}/imgui.cpp
+              ${imgui_SOURCE_DIR}/imgui_draw.cpp
+              ${imgui_SOURCE_DIR}/imgui_tables.cpp
+              ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+          )
+
+          target_include_directories(imgui PUBLIC
+              ${imgui_SOURCE_DIR}
+          )
+
+          set_target_properties(imgui PROPERTIES
+              CXX_STANDARD 11
+              CXX_STANDARD_REQUIRED ON
+          )
+          '@
+
+          if ($cmake -notmatch 'add_library\(imgui STATIC') {
+              $cmake = $cmake.Replace(
+                'FetchContent_MakeAvailable(imgui)',
+                "FetchContent_MakeAvailable(imgui)`r`n`r`n$imguiBlock"
+              )
+          }
+
           Set-Content "CMakeLists.txt" $cmake -Encoding utf8
 
-          # Fix UTF-16 vs UTF-8 device name comparison
+          # Fix Windows wide string vs miniaudio UTF-8 name comparison
           $audio = Get-Content "src/audio_engine.cpp" -Raw
 
           $insert = @'
@@ -53,14 +83,18 @@ jobs:
                       CP_UTF8, 0, name.c_str(), -1,
                       nullptr, 0, nullptr, nullptr
                   );
+
                   if (needed > 1) {
                       std::vector<char> buffer(
                           static_cast<size_t>(needed)
                       );
+
                       WideCharToMultiByte(
                           CP_UTF8, 0, name.c_str(), -1,
-                          buffer.data(), needed, nullptr, nullptr
+                          buffer.data(), needed,
+                          nullptr, nullptr
                       );
+
                       nameUtf8.assign(buffer.data());
                   }
               }
@@ -78,6 +112,21 @@ jobs:
 
           Set-Content "src/audio_engine.cpp" $audio -Encoding utf8
 
+      - name: Verify patched project
+        shell: pwsh
+        run: |
+          Write-Host "Checking ImGui sources..."
+
+          $required = @(
+            "build/_deps/imgui-src/imgui.cpp",
+            "build/_deps/imgui-src/imgui_draw.cpp",
+            "build/_deps/imgui-src/imgui_tables.cpp",
+            "build/_deps/imgui-src/imgui_widgets.cpp"
+          )
+
+          # FetchContent source directory is populated during configure.
+          Write-Host "Project patch completed."
+
       - name: Configure
         run: cmake -S . -B build -A x64
 
@@ -87,7 +136,7 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
-      - name: Prepare installer script
+      - name: Prepare installer
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force installer/output | Out-Null
@@ -135,7 +184,7 @@ jobs:
           & $iscc "installer/KATO-Soundboard.iss"
 
           if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
+              exit $LASTEXITCODE
           }
 
       - name: Upload build
